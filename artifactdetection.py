@@ -1,6 +1,7 @@
 import librosa
 import numpy as np
 import scipy.signal
+import scipy.ndimage as ndi
 import matplotlib.pyplot as plt
 import os
 import pandas as pd
@@ -10,8 +11,8 @@ import pandas as pd
 # Folders
 # -----------------------------------------------------
 
-input_folder = r"path"
-output_folder = r"path"
+input_folder = r"path_to_your_audio_files"  # <-- Change this to your actual input folder path
+output_folder = r"path_to_output_folder"  # <-- Change this to your desired output folder path
 os.makedirs(output_folder, exist_ok=True)
 
 # -----------------------------------------------------
@@ -44,7 +45,7 @@ def check_no_signal(y, sr):
         events.append({"name": "Very quiet", "times": []})
 
     return False, events
-# Otsu threshold
+# Otsu threshold, to determin a threshhold between low and high sound levels.
 
 def otsu_threshold(vols):
     vols = np.clip(vols, 0, 1)
@@ -79,8 +80,7 @@ def otsu_threshold(vols):
 # -----------------------------------------------------
 # Main analyses
 # -----------------------------------------------------
-def analyse_reverberation(y, sr, audio_file):
-
+def analyse_reverberation(y, sr):
     frame_length = int(0.1 * sr)
     hop_length = int(0.05 * sr)
 
@@ -88,7 +88,7 @@ def analyse_reverberation(y, sr, audio_file):
     min_frames = int(min_duration_sec * sr / hop_length)
 
     min_oscillations = 4
-    band_drop_ratio = 0.7   # 30% less Engergy in in certain frequency
+    band_drop_ratio = 0.7   # 30% less Engergy in certain frequency
 
     # -------------------------------------------------
     # 1. Intensity
@@ -108,7 +108,7 @@ def analyse_reverberation(y, sr, audio_file):
     drms = np.diff(rms)
     sign_changes = np.diff(np.sign(drms)) != 0
 
-    # diration changes
+    # diraction changes
     osc_count = np.zeros(len(rms))
     window = int(0.8 * sr / hop_length)
 
@@ -129,7 +129,7 @@ def analyse_reverberation(y, sr, audio_file):
     band_ratio = energy_low / energy_full
 
     # -------------------------------------------------
-    # 4. Wave cinditions
+    # 4. Wave conditions
     # -------------------------------------------------
     wave_condition = (
         (osc_count >= min_oscillations) |
@@ -153,17 +153,11 @@ def analyse_reverberation(y, sr, audio_file):
                 wave_starts.append(start_idx)
             active = False
 
-    wave_detected=False
     if len(wave_starts) > 0:
-        wave_detected=True
-
-    if wave_detected:
         return [{"name": "reverberation/rough Sound", "times": []}]
     return []
 
-
-
-def analyse_volume(y, sr, audio_file):
+def analyse_volume(y, sr):
     # Frame parameters
     frame_length = int(0.1 * sr)
     hop_length = int(0.05 * sr)
@@ -247,7 +241,7 @@ def analyse_volume(y, sr, audio_file):
 # -----------------------------------------------------
 # clicking detection
 # -----------------------------------------------------
-def analyse_clicking1(y, sr, audio_file):
+def analyse_clicking1(y, sr):
     frame_length = int(0.005 * sr)
     hop_length = int(0.003 * sr)
     max_amp = np.max(np.abs(y))
@@ -272,6 +266,14 @@ def analyse_clicking1(y, sr, audio_file):
             next_ = max_abs_per_frame[i+8:i+22]
             if np.max(prev) >= high_thresh and np.max(next_) >= high_thresh:
                 indices.append(i)
+    #for even bigger pauses
+    for i in range(30, len(max_abs_per_frame) - 40):
+        current = max_abs_per_frame[i:i+10]  # slice statt 2D-Index
+        if all(current <= very_low_thresh):
+            prev = max_abs_per_frame[i-30:i]
+            next_ = max_abs_per_frame[i+11:i+40]
+            if np.max(prev) >= high_thresh and np.max(next_) >= high_thresh:
+                indices.append(i)
     times_selected = librosa.frames_to_time(indices, sr=sr, hop_length=hop_length)
     # Group if <1ms apart
     if len(times_selected) > 1:
@@ -288,7 +290,7 @@ def analyse_clicking1(y, sr, audio_file):
     return [{"name": "Clicking1", "times": times_selected}]
 
 
-def analyse_clicking2(y, sr, audio_file):
+def analyse_clicking2(y, sr):
     cutoff = 10000
     nyquist = sr / 2
     cutoff = min(cutoff, nyquist*0.99)
@@ -339,47 +341,70 @@ def analyse_clicking2(y, sr, audio_file):
 # -----------------------------------------------------
 # Overload detection
 # -----------------------------------------------------
-def analyse_clipping(y, sr, audio_file):
-    frame_length = int(0.05 * sr)
-    hop_length = int(0.05 * sr)
+
+def analyse_clipping(y, sr):
+    frame_length = int(0.01 * sr)
+    hop_length = int(0.01 * sr)
+    duration_sec = 0.12
+    duration_frames = int(duration_sec * sr / hop_length)
+    
     max_amp = np.max(np.abs(y))
-    duration=0.5
-    duration_frames=int(duration * sr / hop_length)
+    
+    # adaptive  theshold
     if max_amp >= 1.0:
-        high_thresh = 1.0
-        low_thresh = 0.98
+        high_thresh = 0.96
+  
     else:
         high_thresh = 0.95
-        low_thresh = 0.93
+  
+    
+    # max pro Frame
     frames = librosa.util.frame(y, frame_length=frame_length, hop_length=hop_length)
-    max_abs_per_frame = np.max(np.abs(frames), axis=0)
+    max_per_frame = np.max(np.abs(frames), axis=0)
+    
     ueber = []
     ueber_end = []
     high = False
-    for i in range(0, len(max_abs_per_frame)-duration_frames):
-        if high_thresh==1.0:
-            if any(max_abs_per_frame[i:i+duration_frames] >= high_thresh) and all(max_abs_per_frame[i:i+duration_frames] >= low_thresh) and high is False:
-                ueber.append(i)
-                high = True
-            if max_abs_per_frame[i] < low_thresh and high is True:
-                high = False
-                ueber_end.append(i)
-        else: 
-            if any(max_abs_per_frame[i:i+duration_frames] >= high_thresh) and all(max_abs_per_frame[i:i+duration_frames] >= low_thresh) and high is False:
-                ueber.append(i)
-                high = True
-            if max_abs_per_frame[i] < low_thresh and high is True:
-                high = False
-                ueber_end.append(i)
+    
+    for i in range(len(max_per_frame) - duration_frames):
+        window = max_per_frame[i:i+duration_frames]
+        # Flatness Frames
+        std_window = np.std(window)
+        
+        # criteria: high and flat volume
+        if any(window >= high_thresh) and std_window < 0.01 and not high:
+            ueber.append(i)
+            high = True
+        if std_window >= 0.01 and high:
+            ueber_end.append(i)
+            high = False
+    
     ueber_times = librosa.frames_to_time(ueber, sr=sr, hop_length=hop_length)
     ueber_end_times = librosa.frames_to_time(ueber_end, sr=sr, hop_length=hop_length)
-    return [{"name": "Clipping Start", "times": ueber_times},
-            {"name": "Clipping End", "times": ueber_end_times}]
+    
+    return [
+        {"name": "Clipping Start", "times": ueber_times},
+        {"name": "Clipping End", "times": ueber_end_times}
+    ]
+# -----------------------------------------------------
+# Low volume detection (very quiet speech)
+# -------------------------------------------------
+
+
+def analyse_low_volume(y, sr):
+
+    events=[]
+        #events.append({
+        #    "name": "Low Volume Speech",
+        #    "times": np.array(merged_starts)
+        #})
+
+    return events
 
 # -----------------------------------------------------
 # Noise detection
 # -----------------------------------------------------
-def analyse_noise(y, sr, audio_file):
+def analyse_noise(y, sr):
     events = []
     hop_length = 512
     frame_length = 1024
@@ -405,7 +430,8 @@ def plot_overview(y, sr, events, audio_file):
         "Clicking1": "orange",
         "Clicking2": "yellow",
         "Clipping Start": "purple",
-        "Clipping End": "blue"}
+        "Clipping End": "blue",
+        "Low Volume Speech": "cyan"}
     plotted_labels = set()
     warning_names = ["No Signal", "Very quiet", "Noise", "reverberation/rough Sound"]
     warnings = []
@@ -450,6 +476,7 @@ def make_summary_table(audio_file, events):
         "Clicking1": "",
         "Clicking2": "",
         "Volume": "",
+        "Low Volume Speech": "",
         "reverberation/rough Sound": ""
     }
     clipping_start = []
@@ -457,6 +484,7 @@ def make_summary_table(audio_file, events):
     clicking2 = []
     louder = []
     quieter = []
+    low_vol_speech = []
     for ev in events:
         name = ev["name"]
         times = ev.get("times", [])
@@ -468,6 +496,8 @@ def make_summary_table(audio_file, events):
             row["Noise"] = "Noise detected"
         if name == "reverberation/rough Sound":
             row["reverberation/rough Sound"] = "reverberation/rough Sound detected"
+        if name == "Low Volume Speech" and len(times) > 0:
+            low_vol_speech.extend(times)
         if name == "Clicking1" and len(times) > 0:
             clicking1.extend(times)
         if name == "Clicking2" and len(times) > 0:
@@ -478,6 +508,8 @@ def make_summary_table(audio_file, events):
             louder.extend(times)
         if name == "Volume down" and len(times) > 0:
             quieter.extend(times)
+    if low_vol_speech:
+        row["Low Volume Speech"] = ", ".join(f"{t:.2f}" for t in low_vol_speech)
     if clicking1:
         row["Clicking1"] = ", ".join(f"{t:.2f}" for t in clicking1)
     if clicking2:
@@ -507,12 +539,13 @@ def run_all_analyses(filepath):
         plot_overview(y, sr, all_events, audio_file)
         summary_results.append(make_summary_table(audio_file, all_events))
         return
-    all_events += analyse_volume(y, sr, audio_file)
-    all_events += analyse_clicking1(y, sr, audio_file)
-    all_events += analyse_clicking2(y,sr, audio_file)
-    all_events += analyse_clipping(y, sr, audio_file)
-    all_events += analyse_noise(y, sr, audio_file)
-    all_events += analyse_reverberation(y, sr, audio_file)
+    all_events += analyse_volume(y, sr)
+    all_events += analyse_low_volume(y, sr)
+    all_events += analyse_clicking1(y, sr)
+    all_events += analyse_clicking2(y,sr)
+    all_events += analyse_clipping(y, sr)
+    all_events += analyse_noise(y, sr)
+    all_events += analyse_reverberation(y, sr)
 
     plot_overview(y, sr, all_events, audio_file)
     summary_results.append(make_summary_table(audio_file, all_events))
@@ -522,7 +555,9 @@ def run_all_analyses(filepath):
 # -----------------------------------------------------
 # Find audio files in input folder
 # -----------------------------------------------------
-#solution 1 audio_files in on folder:
+# solution 1: audio_files in on folder:
+
+
 #audio_files = sorted([f for f in os.listdir(input_folder) if f.lower().endswith(valid_ext)])
 #if not audio_files:
 #    print("No audio files found in the input folder!")
@@ -536,7 +571,8 @@ def run_all_analyses(filepath):
 #        print(e)
 #print("\nFertig!")
 
-#or audiofiles in subfolders in a folder:
+
+#solution 2: audiofiles in subfolders in a folder:
 audio_files_2 = []
 for subdir, _, files in os.walk(input_folder):
     for file in files:
