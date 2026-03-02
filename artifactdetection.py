@@ -11,8 +11,8 @@ import pandas as pd
 # Folders
 # -----------------------------------------------------
 
-input_folder = r"path_to_your_audio_files"  # <-- Change this to your actual input folder path
-output_folder = r"path_to_output_folder"  # <-- Change this to your desired output folder path
+input_folder = r"path"  # <-- Change this to your actual input folder path
+output_folder = r"path"  # <-- Change this to your desired output folder path
 os.makedirs(output_folder, exist_ok=True)
 
 # -----------------------------------------------------
@@ -20,18 +20,39 @@ os.makedirs(output_folder, exist_ok=True)
 # -----------------------------------------------------
 valid_ext = (".mp3", ".ogg", ".wav")
 
-# Summary results
+# Store results for summary table
 summary_results = []
 
 # -----------------------------------------------------
 # Helper functions
 # -----------------------------------------------------
 def load_audio(filepath):
+    """
+    Load an audio file using librosa.
+
+    Parameters:
+        filepath (str): Path to audio file.
+
+    Returns:
+        y (np.ndarray): Audio waveform.
+        sr (int): Sampling rate.
+    """
     y, sr = librosa.load(filepath, sr=None, mono=True)
     return y, sr
 
 
 def check_no_signal(y, sr):
+    """
+    Check if the audio has no signal or is very quiet.
+
+    Parameters:
+        y (np.ndarray): Audio waveform.
+        sr (int): Sampling rate.
+
+    Returns:
+        skip (bool): True if audio has no signal (skip further analysis).
+        events (list): List of detected events ("No Signal", "Very quiet").
+    """
     events = []
 
     max_abs = np.max(np.abs(y))
@@ -45,9 +66,18 @@ def check_no_signal(y, sr):
         events.append({"name": "Very quiet", "times": []})
 
     return False, events
-# Otsu threshold, to determin a threshhold between low and high sound levels.
+
 
 def otsu_threshold(vols):
+    """
+    Compute Otsu threshold to separate low and high amplitude regions.
+
+    Parameters:
+        vols (np.ndarray): Normalized amplitude values (0-1)
+
+    Returns:
+        float: Threshold value
+    """
     vols = np.clip(vols, 0, 1)
     hist, bins = np.histogram(vols, bins=256, range=(0, 1))
     total = vols.size
@@ -78,9 +108,19 @@ def otsu_threshold(vols):
     return threshold
 
 # -----------------------------------------------------
-# Main analyses
+# Analysis functions
 # -----------------------------------------------------
 def analyse_reverberation(y, sr):
+    """
+    Detect reverberation or rough sound in audio.
+
+    Parameters:
+        y (np.ndarray): Audio waveform.
+        sr (int): Sampling rate.
+
+    Returns:
+        List[dict]: Events with name "reverberation/rough Sound".
+    """
     frame_length = int(0.1 * sr)
     hop_length = int(0.05 * sr)
 
@@ -90,9 +130,7 @@ def analyse_reverberation(y, sr):
     min_oscillations = 4
     band_drop_ratio = 0.7   # 30% less Engergy in certain frequency
 
-    # -------------------------------------------------
-    # 1. Intensity
-    # -------------------------------------------------
+    #RMS intensity
     rms = librosa.feature.rms(
         y=y,
         frame_length=frame_length,
@@ -102,22 +140,16 @@ def analyse_reverberation(y, sr):
     if np.max(rms) > 0:
         rms = rms / np.max(rms)
 
-    # -------------------------------------------------
-    # 2. Intensity-Oszillation
-    # -------------------------------------------------
+    #intensity oszillations
     drms = np.diff(rms)
     sign_changes = np.diff(np.sign(drms)) != 0
-
-    # diraction changes
     osc_count = np.zeros(len(rms))
     window = int(0.8 * sr / hop_length)
 
     for i in range(window, len(rms)):
         osc_count[i] = np.sum(sign_changes[i - window:i])
 
-    # -------------------------------------------------
-    # 3. Spectral energie
-    # -------------------------------------------------
+    # spectral energy ratio
     S = np.abs(librosa.stft(y, n_fft=2048, hop_length=hop_length))**2
     freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
 
@@ -128,17 +160,14 @@ def analyse_reverberation(y, sr):
     energy_full = np.sum(S[band_full, :], axis=0) + 1e-12
     band_ratio = energy_low / energy_full
 
-    # -------------------------------------------------
-    # 4. Wave conditions
-    # -------------------------------------------------
+    #wave conditions
+
     wave_condition = (
         (osc_count >= min_oscillations) |
         (band_ratio < band_drop_ratio)
     )
 
-    # -------------------------------------------------
-    # 5. durable waves
-    # -------------------------------------------------
+    # detect durable waves
     wave_starts = []
     active = False
     start_idx = 0
@@ -158,13 +187,19 @@ def analyse_reverberation(y, sr):
     return []
 
 def analyse_volume(y, sr):
-    # Frame parameters
+    """
+    Detect sudden drops in volume.
+
+    Returns:
+        List[dict]: Events with name "Volume down".
+    """
     frame_length = int(0.1 * sr)
     hop_length = int(0.05 * sr)
 
     rms = librosa.feature.rms(y=y, frame_length=frame_length, hop_length=hop_length)[0]
     rms_smooth = scipy.signal.medfilt(rms, kernel_size=7)
 
+    # Noise threshold based on first 0.2s
     noise_sec = 0.2
     noise_frames = int(noise_sec * sr / hop_length)
 
@@ -173,6 +208,8 @@ def analyse_volume(y, sr):
     rms_no_noise = rms_smooth.copy()
     rms_no_noise[rms_no_noise < noise_th] = 0
 
+    # Otsu threshold for low-volume detection
+
     active = rms_no_noise[rms_no_noise > 0]
     mean_amp = np.mean(active)
     max_allowed = min(0.9 * np.max(active), 0.9)
@@ -180,7 +217,7 @@ def analyse_volume(y, sr):
 
     th_low = otsu_threshold(active_usage)
 
-    # Transition detection
+    # Detect low volume regions
     margin_sec = 0.3
     margin_frames = int(margin_sec / (hop_length / sr))
     long_margin_sec = 1
@@ -238,10 +275,13 @@ def analyse_volume(y, sr):
 
     return [{"name": "Volume down", "times": low_times}]
 
-# -----------------------------------------------------
-# clicking detection
-# -----------------------------------------------------
 def analyse_clicking1(y, sr):
+    """
+    Detect impulsive clicks in the audio waveform.Rssulting from audiopauses
+
+    Returns:
+        List[dict]: Events with name "Clicking1".
+    """
     frame_length = int(0.005 * sr)
     hop_length = int(0.003 * sr)
     max_amp = np.max(np.abs(y))
@@ -251,6 +291,8 @@ def analyse_clicking1(y, sr):
     frames = librosa.util.frame(y, frame_length=frame_length, hop_length=hop_length)
     max_abs_per_frame = np.max(np.abs(frames), axis=0)
     indices = []
+
+    # Detect clicks based on surrounding high amplitude
     for i in range(3, len(max_abs_per_frame) - 3):
         current = max_abs_per_frame[i]
         if current <= low_thresh:
@@ -275,7 +317,7 @@ def analyse_clicking1(y, sr):
             if np.max(prev) >= high_thresh and np.max(next_) >= high_thresh:
                 indices.append(i)
     times_selected = librosa.frames_to_time(indices, sr=sr, hop_length=hop_length)
-    # Group if <1ms apart
+    # Group clicks <10ms apart
     if len(times_selected) > 1:
         grouped = []
         buffer = [times_selected[0]]
@@ -291,6 +333,12 @@ def analyse_clicking1(y, sr):
 
 
 def analyse_clicking2(y, sr):
+    """
+    Detect impulsive clicks in the audio waveform. resulting from audiojumps.
+
+    Returns:
+        List[dict]: Events with name "Clicking2".
+    """
     cutoff = 10000
     nyquist = sr / 2
     cutoff = min(cutoff, nyquist*0.99)
@@ -324,7 +372,7 @@ def analyse_clicking2(y, sr):
                             knacks2.append(i)
     knacks2 = np.array(knacks2)
     times_selected = np.round(knacks2 / sr, 4)
-    # Group if <1ms apart
+    # Group if <10ms apart
     if len(times_selected) > 1:
         grouped = []
         buffer = [times_selected[0]]
@@ -338,11 +386,13 @@ def analyse_clicking2(y, sr):
         times_selected = np.array(grouped)
     return [{"name": "Clicking2", "times": times_selected}]
 
-# -----------------------------------------------------
-# Overload detection
-# -----------------------------------------------------
-
 def analyse_clipping(y, sr):
+    """
+    Detect clipping. Differentiating between true dlipping over 1 and seemingly clipping audio.
+    Returns:
+        List[dict]: Events with name "Clipping Start".
+        List[dict]: Events with name "Clipping End".
+    """
     frame_length = int(0.01 * sr)
     hop_length = int(0.01 * sr)
     duration_sec = 0.12
@@ -358,7 +408,7 @@ def analyse_clipping(y, sr):
         high_thresh = 0.95
   
     
-    # max pro Frame
+    # max per frame
     frames = librosa.util.frame(y, frame_length=frame_length, hop_length=hop_length)
     max_per_frame = np.max(np.abs(frames), axis=0)
     
@@ -386,25 +436,92 @@ def analyse_clipping(y, sr):
         {"name": "Clipping Start", "times": ueber_times},
         {"name": "Clipping End", "times": ueber_end_times}
     ]
-# -----------------------------------------------------
-# Low volume detection (very quiet speech)
-# -------------------------------------------------
 
 
 def analyse_low_volume(y, sr):
+    """
+    Recognize low volume speech segments. Quick volume drops resulting in very low volume.
+    Returns:
+        List[dict]: Events with name "Low Volume Speech".
+    """
+    hop_length = 1024
+    frame_length = 2048
 
-    events=[]
-        #events.append({
-        #    "name": "Low Volume Speech",
-        #    "times": np.array(merged_starts)
-        #})
+    # RMS
+    rms = librosa.feature.rms(y=y, frame_length=frame_length, hop_length=hop_length)[0]
+    rms_max = np.max(rms)
+    rms_thresh = max(0.08*rms_max, 0.001)  # low volume
+
+    # Voicing detection (pyin)
+    f0, voiced_flag, voiced_prob = librosa.pyin(
+        y, fmin=librosa.note_to_hz('C2'), fmax=librosa.note_to_hz('C7'), hop_length=hop_length
+    )
+    voiced_flag = np.nan_to_num(voiced_flag, nan=0).astype(bool)
+    voiced_prob = np.nan_to_num(voiced_prob, nan=0)
+    # Slight dilation to cover edges
+    voiced_flag = ndi.binary_dilation(voiced_flag, structure=np.ones(5))
+
+    # Frames for score
+    frames = librosa.util.frame(y, frame_length=frame_length, hop_length=hop_length).T
+    # Short-term autocorr & spectral flatness
+    def short_term_autocorr_vectorized(frames):
+        frames = frames - np.mean(frames, axis=1, keepdims=True)
+        energy = np.sum(frames**2, axis=1) + 1e-12
+        max_corr = np.array([np.max(scipy.signal.correlate(f, f, mode='full')[len(f)-1:]) for f in frames])
+        return max_corr / energy
+    def spectral_flatness_vectorized(frames):
+        S = np.abs(np.fft.rfft(frames, axis=1)) + 1e-12
+        return np.exp(np.mean(np.log(S), axis=1)) / np.mean(S, axis=1)
+    autocorr = short_term_autocorr_vectorized(frames)
+    sf = spectral_flatness_vectorized(frames)
+    score_array = 0.5*autocorr + 0.5*(1 - sf)
+
+    # Align lengths
+    min_len = min(len(rms), len(score_array), len(voiced_prob))
+    rms = rms[:min_len]
+    score_array = score_array[:min_len]
+    voiced_prob = voiced_prob[:min_len]
+
+    # Candidate mask
+    candidate_mask = ((rms < rms_thresh) & (voiced_prob > 0.3) & (score_array > 0.5))
+
+    # Only after voiced segments
+    f0_frames = np.where(f0 > 0)[0]
+    candidate_mask_masked = np.zeros_like(candidate_mask, dtype=bool)
+    for v in range(len(f0_frames)-1):
+        end_frame = f0_frames[v]
+        search_end = min(len(candidate_mask), end_frame + int(2*sr/hop_length))
+        candidate_mask_masked[end_frame:search_end] = candidate_mask[end_frame:search_end]
+
+    # Segment formation
+    diff_mask = np.diff(candidate_mask_masked.astype(int))
+    seg_starts = np.where(diff_mask == 1)[0] + 1
+    seg_ends = np.where(diff_mask == -1)[0] + 1
+    if candidate_mask_masked[0]:
+        seg_starts = np.r_[0, seg_starts]
+    if candidate_mask_masked[-1]:
+        seg_ends = np.r_[seg_ends, len(candidate_mask_masked)-1]
+
+    # Duration filter >= 0.5s
+    times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop_length)
+    low_volume_start = []
+    for start, end in zip(seg_starts, seg_ends):
+        t_start = times[start]
+        t_end = times[end]
+        if t_end - t_start >= 0.5:
+            low_volume_start.append((t_start))
+
+    events = []
+    if low_volume_start:
+        events.append({"name": "Low Volume Speech", "times": low_volume_start})
 
     return events
 
-# -----------------------------------------------------
-# Noise detection
-# -----------------------------------------------------
 def analyse_noise(y, sr):
+    """
+    Detect noise based on rms.
+        List[dict]: Events with name "Noise".
+    """
     events = []
     hop_length = 512
     frame_length = 1024
@@ -422,6 +539,12 @@ def analyse_noise(y, sr):
 # Overview plot
 # -----------------------------------------------------
 def plot_overview(y, sr, events, audio_file):
+    """
+    Making an overview of the audio with timestamps of every
+    detected event.
+    Also shows warnings for "No Signal", "Very quiet", "Noise" and "reverberation/rough Sound".
+    Saving plot in outputfolder.
+    """
     times = np.arange(len(y)) / sr
     plt.figure(figsize=(14, 5))
     plt.plot(times, y, color="lightgray", label="Waveform")
@@ -467,6 +590,11 @@ def plot_overview(y, sr, events, audio_file):
 # Summary table
 # -----------------------------------------------------
 def make_summary_table(audio_file, events):
+    """
+    Making a summary table for the audio file with all detected events.
+    Including timestamps.
+    Saving table in outputfolder.
+    """
     row = {
         "File": audio_file,
         "No Signal": "",
@@ -475,7 +603,7 @@ def make_summary_table(audio_file, events):
         "Clipping": "",
         "Clicking1": "",
         "Clicking2": "",
-        "Volume": "",
+        "Volume changes": "",
         "Low Volume Speech": "",
         "reverberation/rough Sound": ""
     }
@@ -504,8 +632,6 @@ def make_summary_table(audio_file, events):
             clicking2.extend(times)
         if name == "Clipping Start" and len(times) > 0:
             clipping_start.extend(times)
-        if name == "Volume up" and len(times) > 0:
-            louder.extend(times)
         if name == "Volume down" and len(times) > 0:
             quieter.extend(times)
     if low_vol_speech:
@@ -522,13 +648,16 @@ def make_summary_table(audio_file, events):
             txt.append("Louder:\n" + ", ".join(f"{t:.2f}" for t in louder))
         if quieter:
             txt.append("Quieter:\n" + ", ".join(f"{t:.2f}" for t in quieter))
-        row["Volume"] = "\n".join(txt)
+        row["Volume changes"] = "\n".join(txt)
     return row
 
 # -----------------------------------------------------
-# Run all analyses
+# Main processing Loop
 # -----------------------------------------------------
 def run_all_analyses(filepath):
+    """
+    Run all audio analyses for a single file.
+    """
     audio_file = os.path.basename(filepath)
     print("\nProcessing:", audio_file)
     y, sr = load_audio(filepath)
@@ -556,7 +685,7 @@ def run_all_analyses(filepath):
 # Find audio files in input folder
 # -----------------------------------------------------
 # solution 1: audio_files in on folder:
-
+# -----------------------------------------------------
 
 #audio_files = sorted([f for f in os.listdir(input_folder) if f.lower().endswith(valid_ext)])
 #if not audio_files:
@@ -571,8 +700,9 @@ def run_all_analyses(filepath):
 #        print(e)
 #print("\nFertig!")
 
-
+# -----------------------------------------------------
 #solution 2: audiofiles in subfolders in a folder:
+# -----------------------------------------------------
 audio_files_2 = []
 for subdir, _, files in os.walk(input_folder):
     for file in files:
@@ -592,6 +722,9 @@ for filename in audio_files_2:
         print(e)
 
 
+# -----------------------------------------------------
+# Create summary Excel file
+# -----------------------------------------------------
 if summary_results:
     df = pd.DataFrame(summary_results)
 
