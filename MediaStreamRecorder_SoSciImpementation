@@ -1,0 +1,479 @@
+<!--
+Browser-based speech recording implementation for SoSci Survey
+--------------------------------------------------------------
+
+This code demonstrates how to record speech using the MediaStream Recorder API
+(https://www.w3.org/TR/mediastream-recording/) inside a SoSci Survey questionnaire 
+using the question type:
+
+    "Transfer file contents"/ "Datei-Inhalte übertragen"
+
+The recording configuration intentionally disables all browser-side audio
+processing (echo cancellation, noise suppression, automatic gain control)
+to minimise artefacts.
+
+The recorded audio is stored as a WebM file and transmitted to SoSci Survey
+using the internal function:
+
+    %q.id%.sendBLOB(blob)
+
+This implementation was used in the study:
+"Evaluation of WebRTCas a Framework for Voice Recordings in Online Surveys"
+Authors: Anabell Hacker(1,2), Iris SidonieBakker(2), Ingo Siegert(1,2)
+1: Mobile Dialog Systems, Otto von Guericke University Magdeburg, 
+2: Research Group on Intelligent Assistive Systems for Psychotherapy, 
+   University Hospital Magdeburg
+
+Repository: https://github.com/Mobile-Dialog-Systeme/webrtc-checker/
+-->
+
+<p>
+Please record a <b>long, strong "A" sound ("aaahhh")</b>
+and after a short pause a <b>long, strong "I" sound ("iiihhh")</b>.
+Hold each vowel for approximately three seconds – a timer will appear in the audio player.
+Speak as loudly and clearly as possible without shouting.
+</p>
+
+<br>
+
+Press <b>START</b> to begin the recording.  
+Press <b>STOP</b> once you have finished.
+
+<br><br>
+
+You can listen to your recording afterwards.  
+If you are satisfied with the result, click <b>Next</b>.
+
+<!-- Warning message shown if the browser does not support audio recording -->
+<div id="%q.id%NoAudio" class="warning" style="display:none;">
+  <div class="content">
+    Your device or browser currently does not support audio recording.
+  </div>
+</div>
+
+<!-- Microphone selection -->
+<div style="margin: 1em 0">
+  <label for="audioInputSelect">Select your recording device:</label>
+  <select id="audioInputSelect"></select>
+</div>
+
+<br>
+
+<button id="btn-start-recording" type="button">START</button>
+<button id="btn-stop-recording" type="button" disabled>STOP</button>
+
+<hr>
+
+<!--
+Simple visual level meter.
+
+This is not part of the recording pipeline itself.
+It only provides participants with feedback to avoid
+recordings that are too quiet or clipped.
+-->
+<div style="margin:1em 0">
+  <label>Level meter:</label>
+  <div id="meter" style="width:200px;height:16px;background:#ddd">
+    <div id="bar" style="height:100%;width:0%;background:#999"></div>
+  </div>
+  <p id="meterStatus">Please speak normally...</p>
+</div>
+
+<!-- Audio player used to preview the recording -->
+<div class="audio-container">
+  <audio controls autoplay playsinline></audio>
+</div>
+
+<style>
+
+/* Responsive audio player layout */
+
+.audio-container {
+  width: 100%;
+  display: block;
+}
+
+audio {
+  width: 100% !important;
+  max-width: 100% !important;
+  height: 44px;
+  box-sizing: border-box;
+  margin-top: 8px;
+}
+
+</style>
+
+<script>
+
+"use strict";
+
+/*
+Core variables used throughout the recording process
+*/
+
+var audio = document.querySelector('audio');
+var btnStartRecording = document.getElementById('btn-start-recording');
+var btnStopRecording  = document.getElementById('btn-stop-recording');
+var audioInputSelect  = document.getElementById('audioInputSelect');
+
+var mediaRecorder;
+var audioChunks = [];
+var microphone;
+
+/*
+Variables used for the level meter visualisation
+(not required for recording itself)
+*/
+let audioCtx, analyser, dataArray;
+
+/*
+Timer variables used to display recording duration
+*/
+let recordTimer = null;
+let recordSeconds = 0;
+
+/*
+Initial button state
+*/
+btnStartRecording.disabled = false;
+btnStopRecording.disabled  = true;
+
+
+/*
+Request microphone access using MediaDevices API.
+
+Important configuration:
+All audio processing modules are disabled to minimise artefacts.
+
+This ensures raw microphone input is captured without browser-side
+modifications such as:
+- echo cancellation
+- noise suppression
+- automatic gain control
+*/
+
+function captureMicrophone(callback) {
+
+  if (microphone) {
+    callback(microphone);
+    return;
+  }
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    document.getElementById("%q.id%NoAudio").style.display = "";
+    return;
+  }
+
+  var constraints = {
+    audio: {
+
+      /* Optional device selection */
+      deviceId: audioInputSelect.value
+        ? { exact: audioInputSelect.value }
+        : undefined,
+
+      /* Disable browser processing */
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+
+      /* Mono recording */
+      channelCount: 1
+    },
+
+    video: false
+  };
+
+  navigator.mediaDevices.getUserMedia(constraints)
+
+    .then(function (mic) {
+      callback(mic);
+    })
+
+    .catch(function (error) {
+      console.error(error);
+      document.getElementById("%q.id%NoAudio").style.display = "";
+    });
+}
+
+
+/*
+START BUTTON
+
+Initialises the recording process and activates the MediaRecorder.
+*/
+
+btnStartRecording.onclick = function (e) {
+
+  e.preventDefault();
+  e.stopPropagation();
+
+  btnStartRecording.disabled = true;
+  btnStopRecording.disabled  = false;
+
+  captureMicrophone(function (stream) {
+
+    microphone = stream;
+
+    /*
+    Display live microphone stream in the audio element
+    (muted to avoid feedback)
+    */
+
+    audio.srcObject = stream;
+    audio.autoplay  = true;
+    audio.muted     = true;
+
+    /*
+    Initialise level meter visualisation
+    */
+
+    initMeter(stream);
+
+    /*
+    Create MediaRecorder instance
+
+    Output format: WebM (Opus codec)
+    This format produced fewer clicking artefacts in our evaluation.
+    */
+
+    mediaRecorder = new MediaRecorder(stream, {
+      mimeType: 'audio/webm'
+    });
+
+    audioChunks = [];
+
+    /*
+    Collect recorded audio data
+    */
+
+    mediaRecorder.ondataavailable = function (event) {
+
+      if (event.data.size > 0) {
+        audioChunks.push(event.data);
+      }
+
+    };
+
+    /*
+    When recording stops:
+    - assemble audio blob
+    - send to SoSci Survey
+    - allow participant to preview recording
+    */
+
+    mediaRecorder.onstop = function () {
+
+      const blob = new Blob(audioChunks, {
+        type: 'audio/webm'
+      });
+
+      const url  = URL.createObjectURL(blob);
+
+      /*
+      Send recording to SoSci Survey
+      */
+
+      %q.id%.sendBLOB(blob);
+
+      /*
+      Replace live stream with recorded audio playback
+      */
+
+      audio.srcObject = null;
+      audio.muted     = false;
+      audio.autoplay  = false;
+      audio.src       = url;
+      audio.load();
+
+      /*
+      Stop recording timer
+      */
+
+      if (recordTimer) {
+        clearInterval(recordTimer);
+        recordTimer = null;
+      }
+
+      btnStartRecording.textContent = "START";
+
+      btnStartRecording.disabled = false;
+      btnStopRecording.disabled  = true;
+    };
+
+    /*
+    Start recording
+    */
+
+    mediaRecorder.start();
+
+    /*
+    Recording duration timer
+    */
+
+    recordSeconds = 0;
+
+    btnStartRecording.textContent =
+      "Recording... " + recordSeconds + " seconds";
+
+    recordTimer = setInterval(function () {
+
+      recordSeconds++;
+
+      btnStartRecording.textContent =
+        "Recording... " + recordSeconds + " seconds";
+
+    }, 1000);
+
+  });
+
+};
+
+
+/*
+STOP BUTTON
+
+Stops the MediaRecorder instance.
+*/
+
+btnStopRecording.onclick = function (e) {
+
+  e.preventDefault();
+  e.stopPropagation();
+
+  btnStopRecording.disabled = true;
+
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    mediaRecorder.stop();
+  }
+
+};
+
+
+/*
+Populate dropdown menu with available microphone devices
+*/
+
+function populateAudioInputDevices() {
+
+  navigator.mediaDevices.enumerateDevices()
+
+    .then(devices => {
+
+      audioInputSelect.innerHTML = '';
+
+      devices.forEach(device => {
+
+        if (device.kind === 'audioinput') {
+
+          const option = document.createElement('option');
+
+          option.value = device.deviceId;
+          option.text  = device.label || 'Microphone';
+
+          audioInputSelect.appendChild(option);
+        }
+
+      });
+
+    });
+
+}
+
+
+/*
+LEVEL METER
+
+Provides real-time feedback about recording level
+to help participants avoid recordings that are too
+quiet or clipped.
+*/
+
+function initMeter(stream) {
+
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+  const src = audioCtx.createMediaStreamSource(stream);
+
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 512;
+
+  dataArray = new Float32Array(analyser.fftSize);
+
+  src.connect(analyser);
+
+  meterLoop();
+
+}
+
+function meterLoop() {
+
+  if (!analyser) return;
+
+  analyser.getFloatTimeDomainData(dataArray);
+
+  let rms = 0;
+
+  for (let i = 0; i < dataArray.length; i++)
+    rms += dataArray[i] * dataArray[i];
+
+  rms = Math.sqrt(rms / dataArray.length);
+
+  let dB = 20 * Math.log10(rms + 1e-12);
+
+  const bar = document.getElementById("bar");
+  const status = document.getElementById("meterStatus");
+
+  const pct = Math.min(100, Math.max(0, (dB + 60) / 54 * 100));
+
+  bar.style.width = pct + "%";
+
+  if (dB > -9) {
+    bar.style.background = "#f66";
+    status.textContent = "Too loud!";
+  }
+
+  else if (dB < -30) {
+    bar.style.background = "#f66";
+    status.textContent = "Too quiet.";
+  }
+
+  else {
+    bar.style.background = "#6f6";
+    status.textContent = "Level OK.";
+  }
+
+  requestAnimationFrame(meterLoop);
+
+}
+
+
+/*
+Initial microphone access (for level meter)
+*/
+
+captureMicrophone(function(stream) {
+
+  microphone = stream;
+
+  initMeter(stream);
+
+});
+
+
+/*
+Initialise microphone device list
+*/
+
+if (navigator.mediaDevices &&
+    navigator.mediaDevices.enumerateDevices) {
+
+  populateAudioInputDevices();
+
+}
+
+</script>
+
+<footer style="margin-top: 20px;">
+  <small id="send-message"></small>
+</footer>
