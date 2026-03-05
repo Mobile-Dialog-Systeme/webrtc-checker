@@ -137,6 +137,7 @@ audio: {
   autoGainControl: false,
   channelCount: 1
 }
+```
 
 This captures the raw microphone signal with minimal browser-side modification.
 
